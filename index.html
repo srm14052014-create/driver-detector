@@ -3,7 +3,6 @@
   <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Sleeping Driver Detector</title>
-    <script src="https://jsdelivr.net" crossorigin="anonymous"></script>
   </head>
   <body
     id="pageBody"
@@ -23,13 +22,14 @@
     <button
       id="startBtn"
       onclick="startCamera()"
+      disabled
       style="
         width: 95%;
         max-width: 340px;
         padding: 16px;
         font-size: 18px;
         font-weight: bold;
-        background: #1a73e8;
+        background: #9aa0a6;
         color: white;
         border: none;
         border-radius: 12px;
@@ -37,7 +37,7 @@
         cursor: pointer;
       "
     >
-      1. Start Front Camera
+      Loading Google AI...
     </button>
 
     <button
@@ -72,7 +72,7 @@
         font-weight: bold;
       "
     >
-      Ready! Tap Start
+      Preparing AI...
     </div>
 
     <video
@@ -93,22 +93,47 @@
       id="debug"
       style="margin-top: 10px; font-size: 16px; font-weight: bold; color: #555"
     >
-      Eye Openness: --
+      Eye Closure: 0%
     </div>
 
-    <script>
-      let writer,
-        closedFrames = 0,
-        faceMesh;
+    <script type="module">
+      import { FaceLandmarker, FilesetResolver } from "https://jsdelivr.net";
+
+      let faceLandmarker,
+        writer,
+        closedFrames = 0;
       let audio = new (window.AudioContext || window.webkitAudioContext)();
       const video = document.getElementById("webcam");
       const statusBox = document.getElementById("status");
+      const startBtn = document.getElementById("startBtn");
 
-      function dist(a, b) {
-        return Math.hypot(a.x - b.x, a.y - b.y);
+      async function loadAI() {
+        try {
+          const vision = await FilesetResolver.forVisionTasks(
+            "https://jsdelivr.net",
+          );
+          faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: "https://googleapis.com",
+            },
+            outputFaceBlendshapes: true,
+            runningMode: "VIDEO",
+            numFaces: 1,
+          });
+
+          startBtn.disabled = false;
+          startBtn.style.background = "#1a73e8";
+          startBtn.innerText = "1. Start Front Camera";
+          statusBox.innerText = "Ready! Tap Start";
+        } catch (err) {
+          statusBox.innerText = "AI Load Error: " + err.message;
+          statusBox.style.background = "#fce8e6";
+          statusBox.style.color = "#d93025";
+        }
       }
+      loadAI();
 
-      async function connectArduino() {
+      window.connectArduino = async function () {
         try {
           const port = await navigator.serial.requestPort();
           await port.open({ baudRate: 9600 });
@@ -117,89 +142,76 @@
         } catch (e) {
           alert("No Arduino connected. Using mobile speaker alarm.");
         }
-      }
+      };
 
-      async function startCamera() {
+      window.startCamera = async function () {
         try {
           if (audio.state === "suspended") await audio.resume();
-          statusBox.innerText = "Opening Camera...";
-
           const stream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: "user", width: 320, height: 240 },
             audio: false,
           });
           video.srcObject = stream;
           await video.play();
-          statusBox.innerText = "Loading Eye Sensor...";
-
-          faceMesh = new FaceMesh({
-            locateFile: (file) => `https://jsdelivr.net{file}`,
-          });
-
-          faceMesh.setOptions({
-            maxNumFaces: 1,
-            refineLandmarks: false,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5,
-          });
-
-          faceMesh.onResults((results) => {
-            const faces = results.multiFaceLandmarks;
-            if (faces && faces.length > 0) {
-              const lm = faces.at(0);
-              const leftEAR =
-                dist(lm.at(159), lm.at(145)) / dist(lm.at(33), lm.at(133));
-              const rightEAR =
-                dist(lm.at(386), lm.at(374)) / dist(lm.at(362), lm.at(263));
-              const ear = (leftEAR + rightEAR) / 2;
-
-              document.getElementById("debug").innerText =
-                "Eye Openness: " + ear.toFixed(2);
-
-              if (ear < 0.21) {
-                closedFrames++;
-                if (closedFrames > 20) {
-                  statusBox.innerText = "WAKE UP!";
-                  statusBox.style.background = "#d93025";
-                  statusBox.style.color = "white";
-                  document.getElementById("pageBody").style.backgroundColor =
-                    "#fce8e6";
-
-                  let osc = audio.createOscillator();
-                  osc.type = "square";
-                  osc.frequency.setValueAtTime(950, audio.currentTime);
-                  osc.connect(audio.destination);
-                  osc.start();
-                  osc.stop(audio.currentTime + 0.12);
-
-                  if (writer) writer.write(new TextEncoder().encode("1"));
-                }
-              } else {
-                closedFrames = 0;
-                statusBox.innerText = "Awake";
-                statusBox.style.background = "#e6f4ea";
-                statusBox.style.color = "#137333";
-                document.getElementById("pageBody").style.backgroundColor =
-                  "#f8f9fa";
-                if (writer) writer.write(new TextEncoder().encode("0"));
-              }
-            }
-          });
-
           statusBox.innerText = "Awake";
-          processVideo();
+          predictLoop();
         } catch (err) {
-          statusBox.innerText = "Error: " + err.message;
-          statusBox.style.background = "#fce8e6";
-          statusBox.style.color = "#d93025";
+          statusBox.innerText = "Camera Error: " + err.message;
         }
-      }
+      };
 
-      async function processVideo() {
-        if (video.readyState >= 2 && faceMesh) {
-          await faceMesh.send({ image: video });
+      let lastVideoTime = -1;
+      async function predictLoop() {
+        if (video.currentTime !== lastVideoTime) {
+          lastVideoTime = video.currentTime;
+          const results = faceLandmarker.detectForVideo(
+            video,
+            performance.now(),
+          );
+
+          if (results.faceBlendshapes && results.faceBlendshapes.length > 0) {
+            const shapes = results.faceBlendshapes.at(0).categories;
+            const leftBlink = shapes.find(
+              (s) => s.categoryName === "eyeBlinkLeft",
+            ).score;
+            const rightBlink = shapes.find(
+              (s) => s.categoryName === "eyeBlinkRight",
+            ).score;
+            const avgClosed = (leftBlink + rightBlink) / 2;
+
+            document.getElementById("debug").innerText =
+              "Eye Closure: " + Math.round(avgClosed * 100) + "%";
+
+            if (avgClosed > 0.55) {
+              closedFrames++;
+              if (closedFrames > 22) {
+                statusBox.innerText = "WAKE UP!";
+                statusBox.style.background = "#d93025";
+                statusBox.style.color = "white";
+                document.getElementById("pageBody").style.backgroundColor =
+                  "#fce8e6";
+
+                let osc = audio.createOscillator();
+                osc.type = "square";
+                osc.frequency.setValueAtTime(950, audio.currentTime);
+                osc.connect(audio.destination);
+                osc.start();
+                osc.stop(audio.currentTime + 0.12);
+
+                if (writer) writer.write(new TextEncoder().encode("1"));
+              }
+            } else {
+              closedFrames = 0;
+              statusBox.innerText = "Awake";
+              statusBox.style.background = "#e6f4ea";
+              statusBox.style.color = "#137333";
+              document.getElementById("pageBody").style.backgroundColor =
+                "#f8f9fa";
+              if (writer) writer.write(new TextEncoder().encode("0"));
+            }
+          }
         }
-        requestAnimationFrame(processVideo);
+        requestAnimationFrame(predictLoop);
       }
     </script>
   </body>
