@@ -2,22 +2,20 @@
 <html>
   <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Sleeping Driver Detector</title>
+    <title>Automatic Sleeping Driver Detector</title>
   </head>
   <body
     id="pageBody"
     style="
       font-family: sans-serif;
       text-align: center;
-      padding: 20px;
+      padding: 16px;
       margin: 0;
       background-color: #f8f9fa;
       transition: 0.2s;
     "
   >
-    <h2 style="margin: 8px 0 14px 0; color: #202124">
-      Sleeping Driver Detector
-    </h2>
+    <h2 style="margin: 8px 0 14px 0; color: #202124">Auto Driver Detector</h2>
 
     <button
       id="startBtn"
@@ -36,7 +34,7 @@
         cursor: pointer;
       "
     >
-      1. Start Front Camera
+      1. Start Auto Detection
     </button>
 
     <button
@@ -71,7 +69,7 @@
         font-weight: bold;
       "
     >
-      Ready! Instant Start
+      Ready! Tap Start
     </div>
 
     <div
@@ -91,53 +89,49 @@
           background: #000;
         "
       ></video>
-      <!-- Eye alignment guide box -->
-      <div
+      <canvas
+        id="overlay"
+        width="260"
+        height="260"
         style="
           position: absolute;
-          top: 85px;
-          left: 55px;
-          width: 150px;
-          height: 45px;
-          border: 3px solid #00e676;
-          border-radius: 10px;
+          top: 0;
+          left: 0;
           pointer-events: none;
+          transform: scaleX(-1);
         "
-      ></div>
+      ></canvas>
     </div>
 
-    <p style="font-size: 14px; color: #555; margin: 8px 0">
-      Align your eyes inside the green box
-    </p>
-    <button
-      onclick="calibrateOpenEyes()"
-      style="
-        padding: 10px 20px;
-        font-size: 15px;
-        background: #34a853;
-        color: white;
-        border: none;
-        border-radius: 8px;
-        margin-bottom: 8px;
-      "
+    <div
+      id="debug"
+      style="margin-top: 10px; font-size: 15px; font-weight: bold; color: #555"
     >
-      Set Open Eyes (Calibrate)
-    </button>
-    <div id="debug" style="font-size: 15px; font-weight: bold; color: #555">
-      Eye Contrast: --
+      Face & Eyes: Waiting...
     </div>
-
-    <canvas id="canvas" width="150" height="45" style="display: none"></canvas>
+    <canvas id="proc" width="320" height="240" style="display: none"></canvas>
 
     <script>
       let writer,
         closedFrames = 0,
-        openEyeBaseline = 0;
+        autoOpenBaseline = 0,
+        sampleCount = 0;
+      let faceDetector = null;
       let audio = new (window.AudioContext || window.webkitAudioContext)();
       const video = document.getElementById("webcam");
-      const canvas = document.getElementById("canvas");
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      const procCanvas = document.getElementById("proc");
+      const procCtx = procCanvas.getContext("2d", { willReadFrequently: true });
+      const overlay = document.getElementById("overlay");
+      const overCtx = overlay.getContext("2d");
       const statusBox = document.getElementById("status");
+
+      // Initialize Android Chrome's built-in fast hardware FaceDetector
+      if ("FaceDetector" in window) {
+        faceDetector = new FaceDetector({
+          fastMode: true,
+          maxDetectedFaces: 1,
+        });
+      }
 
       async function connectArduino() {
         try {
@@ -150,30 +144,27 @@
         }
       }
 
-      function measureEyeContrast() {
-        ctx.drawImage(video, 65, 95, 190, 60, 0, 0, 150, 45);
-        const data = ctx.getImageData(0, 0, 150, 45).data;
-        let darkPixels = 0;
-        let totalBrightness = 0;
+      // Measure sharpness inside a small box around an eye
+      function measureEyeBox(cx, cy, boxW, boxH) {
+        const x0 = Math.max(0, Math.round(cx - boxW / 2));
+        const y0 = Math.max(0, Math.round(cy - boxH / 2));
+        const w = Math.min(320 - x0, Math.round(boxW));
+        const h = Math.min(240 - y0, Math.round(boxH));
+        if (w <= 2 || h <= 2) return 0;
 
-        for (let i = 0; i < data.length; i += 4) {
-          const brightness = (data.at(i) + data.at(i + 1) + data.at(i + 2)) / 3;
-          totalBrightness += brightness;
-        }
-        const avgBrightness = totalBrightness / (data.length / 4);
-
-        for (let i = 0; i < data.length; i += 4) {
-          const brightness = (data.at(i) + data.at(i + 1) + data.at(i + 2)) / 3;
-          if (brightness < avgBrightness * 0.65) {
-            darkPixels++;
+        const data = procCtx.getImageData(x0, y0, w, h).data;
+        let sharpness = 0;
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w - 1; x++) {
+            const i = (y * w + x) * 4;
+            const next = i + 4;
+            const b1 = (data.at(i) + data.at(i + 1) + data.at(i + 2)) / 3;
+            const b2 =
+              (data.at(next) + data.at(next + 1) + data.at(next + 2)) / 3;
+            sharpness += Math.abs(b1 - b2);
           }
         }
-        return darkPixels;
-      }
-
-      function calibrateOpenEyes() {
-        openEyeBaseline = measureEyeContrast();
-        alert("Open eyes saved! Now close your eyes to test.");
+        return sharpness / (w * h);
       }
 
       async function startCamera() {
@@ -185,52 +176,118 @@
           });
           video.srcObject = stream;
           await video.play();
-
-          setTimeout(() => {
-            openEyeBaseline = measureEyeContrast();
-            statusBox.innerText = "Awake";
-            detectLoop();
-          }, 600);
+          statusBox.innerText = "Auto-Detecting Face...";
+          detectLoop();
         } catch (err) {
           statusBox.innerText = "Camera Error: " + err.message;
         }
       }
 
       async function detectLoop() {
-        const currentContrast = measureEyeContrast();
-        document.getElementById("debug").innerText =
-          "Pupil Score: " +
-          currentContrast +
-          " (Open: " +
-          openEyeBaseline +
-          ")";
+        if (video.readyState >= 2) {
+          procCtx.drawImage(video, 0, 0, 320, 240);
+          overCtx.clearRect(0, 0, 260, 260);
 
-        // When eyes close, dark pupils disappear so contrast drops below 55% of open baseline
-        if (openEyeBaseline > 0 && currentContrast < openEyeBaseline * 0.55) {
-          closedFrames++;
-          if (closedFrames > 35) {
-            statusBox.innerText = "WAKE UP!";
-            statusBox.style.background = "#d93025";
-            statusBox.style.color = "white";
-            document.getElementById("pageBody").style.backgroundColor =
-              "#fce8e6";
+          let eyeScore = 0;
+          let faceFound = false;
 
-            let osc = audio.createOscillator();
-            osc.type = "square";
-            osc.frequency.setValueAtTime(950, audio.currentTime);
-            osc.connect(audio.destination);
-            osc.start();
-            osc.stop(audio.currentTime + 0.12);
+          // 1. Automatically find face and exact eye positions
+          if (faceDetector) {
+            try {
+              const faces = await faceDetector.detect(procCanvas);
+              if (faces.length > 0) {
+                faceFound = true;
+                const box = faces.at(0).boundingBox;
+                const eyeY = box.top + box.height * 0.36;
+                const leftEyeX = box.left + box.width * 0.33;
+                const rightEyeX = box.left + box.width * 0.67;
+                const ew = box.width * 0.22;
+                const eh = box.height * 0.14;
 
-            if (writer) writer.write(new TextEncoder().encode("1"));
+                // Draw automatic green tracking boxes over both eyes
+                const scaleX = 260 / 320;
+                const scaleY = 260 / 240;
+                overCtx.strokeStyle = "#00e676";
+                overCtx.lineWidth = 2.5;
+                overCtx.strokeRect(
+                  (leftEyeX - ew / 2) * scaleX,
+                  (eyeY - eh / 2) * scaleY,
+                  ew * scaleX,
+                  eh * scaleY,
+                );
+                overCtx.strokeRect(
+                  (rightEyeX - ew / 2) * scaleX,
+                  (eyeY - eh / 2) * scaleY,
+                  ew * scaleX,
+                  eh * scaleY,
+                );
+
+                eyeScore =
+                  (measureEyeBox(leftEyeX, eyeY, ew, eh) +
+                    measureEyeBox(rightEyeX, eyeY, ew, eh)) /
+                  2;
+              }
+            } catch (e) {}
           }
-        } else {
-          closedFrames = 0;
-          statusBox.innerText = "Awake";
-          statusBox.style.background = "#e6f4ea";
-          statusBox.style.color = "#137333";
-          document.getElementById("pageBody").style.backgroundColor = "#f8f9fa";
-          if (writer) writer.write(new TextEncoder().encode("0"));
+
+          // Fallback if browser lacks FaceDetector
+          if (!faceDetector) {
+            faceFound = true;
+            eyeScore = measureEyeBox(160, 95, 130, 35);
+          }
+
+          if (faceFound && eyeScore > 0) {
+            // Automatically learn your open-eye baseline during the first 20 frames
+            if (sampleCount < 20) {
+              autoOpenBaseline =
+                (autoOpenBaseline * sampleCount + eyeScore) / (sampleCount + 1);
+              sampleCount++;
+              statusBox.innerText = "Auto-Learning Eyes...";
+            } else {
+              // Slowly adapt baseline when eyes are clearly open
+              if (eyeScore > autoOpenBaseline * 0.85) {
+                autoOpenBaseline = autoOpenBaseline * 0.95 + eyeScore * 0.05;
+              }
+
+              const isClosed = eyeScore < autoOpenBaseline * 0.68;
+              document.getElementById("debug").innerText =
+                "Eye Score: " +
+                eyeScore.toFixed(1) +
+                " (Normal: " +
+                autoOpenBaseline.toFixed(1) +
+                ")";
+
+              if (isClosed) {
+                closedFrames++;
+                if (closedFrames > 22) {
+                  statusBox.innerText = "WAKE UP!";
+                  statusBox.style.background = "#d93025";
+                  statusBox.style.color = "white";
+                  document.getElementById("pageBody").style.backgroundColor =
+                    "#fce8e6";
+
+                  let osc = audio.createOscillator();
+                  osc.type = "square";
+                  osc.frequency.setValueAtTime(950, audio.currentTime);
+                  osc.connect(audio.destination);
+                  osc.start();
+                  osc.stop(audio.currentTime + 0.12);
+
+                  if (writer) writer.write(new TextEncoder().encode("1"));
+                }
+              } else {
+                closedFrames = 0;
+                statusBox.innerText = "Awake";
+                statusBox.style.background = "#e6f4ea";
+                statusBox.style.color = "#137333";
+                document.getElementById("pageBody").style.backgroundColor =
+                  "#f8f9fa";
+                if (writer) writer.write(new TextEncoder().encode("0"));
+              }
+            }
+          } else {
+            document.getElementById("debug").innerText = "Looking for face...";
+          }
         }
         requestAnimationFrame(detectLoop);
       }
