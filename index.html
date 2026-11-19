@@ -74,9 +74,7 @@
       Ready! Tap Start
     </div>
 
-    <div
-      style="position: relative; width: 260px; height: 260px; margin: 0 auto"
-    >
+    <div style="width: 260px; height: 260px; margin: 0 auto">
       <video
         id="webcam"
         autoplay
@@ -91,18 +89,6 @@
           background: #000;
         "
       ></video>
-      <canvas
-        id="overlay"
-        width="260"
-        height="260"
-        style="
-          position: absolute;
-          top: 0;
-          left: 0;
-          pointer-events: none;
-          transform: scaleX(-1);
-        "
-      ></canvas>
     </div>
 
     <div
@@ -124,11 +110,8 @@
       const video = document.getElementById("webcam");
       const proc = document.getElementById("proc");
       const pctx = proc.getContext("2d", { willReadFrequently: true });
-      const overlay = document.getElementById("overlay");
-      const octx = overlay.getContext("2d");
       const statusBox = document.getElementById("status");
 
-      // Safely initialize FaceDetector without crashing the script
       try {
         if ("FaceDetector" in window) {
           faceDetector = new FaceDetector({
@@ -177,7 +160,6 @@
               data.at(iBot + 1) * 0.587 +
               data.at(iBot + 2) * 0.114;
 
-            // Ignore solid black objects/hair (lum < 22)
             if (lumTop > 22 && lumBot > 22) {
               verticalEdge += Math.abs(lumTop - lumBot);
               validPixels++;
@@ -216,9 +198,6 @@
       async function detectLoop() {
         if (video.readyState >= 2) {
           pctx.drawImage(video, 0, 0, 320, 240);
-          octx.clearRect(0, 0, 260, 260);
-          const scaleX = 260 / 320,
-            scaleY = 260 / 240;
 
           let eyePts = [];
           let faceWidth = 140;
@@ -259,7 +238,6 @@
             }
           }
 
-          // Fallback center eye points if FaceDetector is unavailable
           if (!faceDetector) {
             faceDetected = true;
             eyePts = [
@@ -269,15 +247,6 @@
           }
 
           if (faceDetected && eyePts.length === 2) {
-            // Draw tight green circles on eye centers
-            octx.strokeStyle = "#00e676";
-            octx.lineWidth = 2.5;
-            eyePts.forEach((pt) => {
-              octx.beginPath();
-              octx.arc(pt.x * scaleX, pt.y * scaleY, 10, 0, Math.PI * 2);
-              octx.stroke();
-            });
-
             const score =
               (measureEyelidGap(eyePts.at(0).x, eyePts.at(0).y, faceWidth) +
                 measureEyelidGap(eyePts.at(1).x, eyePts.at(1).y, faceWidth)) /
