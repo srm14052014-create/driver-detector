@@ -1,379 +1,332 @@
 <!doctype html>
 <html>
   <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Sleeping Driver Detector</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <title>Driver Detector</title>
   </head>
   <body
-    id="pageBody"
+    id="body"
     style="
       font-family: sans-serif;
       text-align: center;
-      padding: 16px;
+      padding: 12px;
       margin: 0;
-      background-color: #f8f9fa;
-      transition: 0.2s;
+      background: #f8f9fa;
     "
   >
-    <h2 style="margin: 8px 0 14px 0; color: #202124">
-      Sleeping Driver Detector
-    </h2>
-
+    <h3 style="margin: 6px 0 10px">Sleeping Driver Detector</h3>
     <button
-      id="startBtn"
-      onclick="startCamera()"
+      onclick="start()"
       style="
-        width: 95%;
-        max-width: 340px;
-        padding: 16px;
-        font-size: 18px;
+        width: 92%;
+        max-width: 320px;
+        padding: 14px;
+        font-size: 17px;
         font-weight: bold;
         background: #1a73e8;
-        color: white;
-        border: none;
-        border-radius: 12px;
-        margin-bottom: 10px;
-        cursor: pointer;
+        color: #fff;
+        border: 0;
+        border-radius: 10px;
+        margin-bottom: 8px;
       "
     >
-      1. Start Auto Detection
+      1. Start Camera
     </button>
-
     <button
-      onclick="connectArduino()"
+      onclick="connectUSB()"
       style="
-        width: 95%;
-        max-width: 340px;
-        padding: 11px;
+        width: 92%;
+        max-width: 320px;
+        padding: 10px;
         font-size: 14px;
         background: #e8eaed;
         color: #333;
-        border: none;
-        border-radius: 10px;
-        margin-bottom: 12px;
-        cursor: pointer;
+        border: 0;
+        border-radius: 8px;
+        margin-bottom: 10px;
       "
     >
-      2. Connect Arduino (Optional)
+      2. Connect Arduino
     </button>
-
     <div
       id="status"
       style="
-        width: 95%;
-        max-width: 340px;
-        margin: 0 auto 12px auto;
-        padding: 12px;
-        border-radius: 10px;
+        width: 92%;
+        max-width: 320px;
+        margin: 0 auto 10px;
+        padding: 10px;
+        border-radius: 8px;
         background: #e6f4ea;
         color: #137333;
-        font-size: 20px;
+        font-size: 19px;
         font-weight: bold;
       "
     >
       Ready! Tap Start
     </div>
-
-    <div style="width: 260px; height: 260px; margin: 0 auto">
-      <video
-        id="webcam"
-        autoplay
-        playsinline
-        muted
-        style="
-          width: 260px;
-          height: 260px;
-          object-fit: cover;
-          border-radius: 16px;
-          transform: scaleX(-1);
-          background: #000;
-        "
-      ></video>
-    </div>
-
+    <video
+      id="vid"
+      autoplay
+      playsinline
+      muted
+      style="
+        width: 240px;
+        height: 240px;
+        object-fit: cover;
+        border-radius: 14px;
+        transform: scaleX(-1);
+        background: #000;
+      "
+    ></video>
     <div
-      id="debug"
-      style="margin-top: 10px; font-size: 15px; font-weight: bold; color: #444"
+      id="info"
+      style="margin-top: 8px; font-size: 14px; font-weight: bold; color: #444"
     >
-      Eye Lock: Ready
+      Waiting...
     </div>
-    <canvas id="proc" width="320" height="240" style="display: none"></canvas>
+    <canvas id="c" width="320" height="240" style="display: none"></canvas>
 
     <script>
-      var writer = null;
-      var closedFrames = 0;
-      var openBaseline = 0;
-      var learnCount = 0;
-      var missingFrames = 0;
-      var lastFaceX = -1;
-      var lastFaceY = -1;
-      var faceDetector = null;
-      var audio = null;
-
-      var video = document.getElementById("webcam");
-      var proc = document.getElementById("proc");
-      var pctx = proc.getContext("2d", { willReadFrequently: true });
-      var statusBox = document.getElementById("status");
+      var writer,
+        closedStart = 0,
+        base = 0,
+        learn = 0,
+        miss = 0,
+        lx = -1,
+        ly = -1,
+        lw = -1,
+        fd = null,
+        audio,
+        sirenTick = 0;
+      var vid = document.getElementById("vid"),
+        c = document.getElementById("c"),
+        ctx = c.getContext("2d", { willReadFrequently: true }),
+        st = document.getElementById("status");
 
       try {
-        if (window.FaceDetector) {
-          faceDetector = new window.FaceDetector({
-            fastMode: true,
-            maxDetectedFaces: 1,
-          });
-        }
-      } catch (e) {
-        faceDetector = null;
-      }
+        if (window.FaceDetector)
+          fd = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+      } catch (e) {}
 
-      function connectArduino() {
-        if (!navigator.serial) {
-          alert("USB Serial not supported here. Using mobile speaker alarm.");
-          return;
-        }
+      function connectUSB() {
+        if (!navigator.serial) return alert("Using mobile speaker alarm.");
         navigator.serial
           .requestPort()
-          .then(function (port) {
-            return port.open({ baudRate: 9600 }).then(function () {
-              writer = port.writable.getWriter();
-              alert("Arduino Nano Connected!");
-            });
-          })
-          .catch(function () {
-            alert("No Arduino connected. Using mobile speaker alarm.");
-          });
+          .then((p) =>
+            p.open({ baudRate: 9600 }).then(() => {
+              writer = p.writable.getWriter();
+              alert("Arduino Connected!");
+            }),
+          )
+          .catch(() => alert("Using mobile speaker alarm."));
       }
 
-      function measureEyelidGap(cx, cy, faceWidth) {
-        var rx = Math.max(5, Math.round(faceWidth * 0.065));
-        var ry = Math.max(4, Math.round(faceWidth * 0.05));
-        var x0 = Math.max(1, Math.round(cx - rx));
-        var y0 = Math.max(1, Math.round(cy - ry));
-        var w = Math.min(318 - x0, rx * 2);
-        var h = Math.min(238 - y0, ry * 2);
-        if (w <= 2 || h <= 2) return -1;
+      function sendUSB(v) {
+        if (writer)
+          try {
+            writer.write(new TextEncoder().encode(v));
+          } catch (e) {}
+      }
 
-        var data = pctx.getImageData(x0, y0, w, h).data;
-        var verticalEdge = 0;
-        var validPixels = 0;
-        var skinOrEyePixels = 0;
-        var totalPixels = w * h;
+      function playLoudSiren() {
+        if (!audio) return;
+        try {
+          var osc = audio.createOscillator(),
+            gain = audio.createGain();
+          osc.type = "sawtooth";
+          osc.frequency.setValueAtTime(
+            sirenTick % 2 === 0 ? 1100 : 800,
+            audio.currentTime,
+          );
+          sirenTick++;
+          gain.gain.setValueAtTime(1.0, audio.currentTime);
+          osc.connect(gain);
+          gain.connect(audio.destination);
+          osc.start();
+          osc.stop(audio.currentTime + 0.14);
+        } catch (e) {}
+      }
 
-        for (var i = 0; i < data.length; i += 4) {
-          var r = data[i];
-          var g = data[i + 1];
-          var b = data[i + 2];
-          var lum = r * 0.299 + g * 0.587 + b * 0.114;
-          if (lum > 45 && ((r > g && g >= b) || lum > 150)) {
-            skinOrEyePixels++;
-          }
+      function eyeGap(cx, cy, fw, fh) {
+        var rx = Math.max(6, Math.round(fw * 0.08)),
+          ry = Math.max(5, Math.round(fh * 0.06));
+        var x0 = Math.max(1, Math.round(cx - rx)),
+          y0 = Math.max(1, Math.round(cy - ry));
+        var w = Math.min(318 - x0, rx * 2),
+          h = Math.min(238 - y0, ry * 2);
+        if (w <= 3 || h <= 3) return -1;
+        var d = ctx.getImageData(x0, y0, w, h).data,
+          edge = 0,
+          valid = 0,
+          skin = 0;
+        for (var i = 0; i < d.length; i += 4) {
+          var r = d.at(i),
+            g = d.at(i + 1),
+            b = d.at(i + 2),
+            lum = r * 0.299 + g * 0.587 + b * 0.114;
+          if (lum > 42 && ((r > g && g >= b) || lum > 145)) skin++;
         }
-
-        if (skinOrEyePixels < totalPixels * 0.35) {
-          return -1;
-        }
-
+        if (skin < w * h * 0.35) return -1;
         for (var y = 0; y < h - 1; y++) {
           for (var x = 0; x < w; x++) {
-            var iTop = (y * w + x) * 4;
-            var iBot = ((y + 1) * w + x) * 4;
-            var lumTop =
-              data[iTop] * 0.299 +
-              data[iTop + 1] * 0.587 +
-              data[iTop + 2] * 0.114;
-            var lumBot =
-              data[iBot] * 0.299 +
-              data[iBot + 1] * 0.587 +
-              data[iBot + 2] * 0.114;
-
-            if (lumTop > 35 && lumBot > 35) {
-              verticalEdge += Math.abs(lumTop - lumBot);
-              validPixels++;
+            var i1 = (y * w + x) * 4,
+              i2 = ((y + 1) * w + x) * 4;
+            var l1 =
+              d.at(i1) * 0.299 + d.at(i1 + 1) * 0.587 + d.at(i1 + 2) * 0.114;
+            var l2 =
+              d.at(i2) * 0.299 + d.at(i2 + 1) * 0.587 + d.at(i2 + 2) * 0.114;
+            if (l1 > 32 && l2 > 32) {
+              edge += Math.abs(l1 - l2);
+              valid++;
             }
           }
         }
-        return validPixels > 0 ? verticalEdge / validPixels : -1;
+        return valid > 0 ? (edge / valid) * (h / 12) : -1;
       }
 
-      function resetForNewPerson() {
-        learnCount = 0;
-        openBaseline = 0;
-        closedFrames = 0;
-      }
-
-      function startCamera() {
-        statusBox.innerText = "Opening Camera...";
+      function start() {
+        st.innerText = "Opening Camera...";
         try {
-          if (!audio) {
-            var AudioCtx = window.AudioContext || window.webkitAudioContext;
-            audio = new AudioCtx();
-          }
-          if (audio.state === "suspended") {
-            audio.resume();
-          }
+          if (!audio)
+            audio = new (window.AudioContext || window.webkitAudioContext)();
+          if (audio.state === "suspended") audio.resume();
         } catch (e) {}
-
         navigator.mediaDevices
           .getUserMedia({
             video: { facingMode: "user", width: 320, height: 240 },
             audio: false,
           })
-          .then(function (stream) {
-            video.srcObject = stream;
-            return video.play();
+          .then((s) => {
+            vid.srcObject = s;
+            return vid.play();
           })
-          .then(function () {
-            resetForNewPerson();
-            detectLoop();
+          .then(() => {
+            learn = 0;
+            base = 0;
+            closedStart = 0;
+            loop();
           })
-          .catch(function (err) {
-            statusBox.innerText = "Camera Error: " + err.message;
-            statusBox.style.background = "#fce8e6";
-            statusBox.style.color = "#d93025";
+          .catch((e) => {
+            st.innerText = "Error: " + e.message;
           });
       }
 
-      function sendArduino(val) {
-        if (writer) {
-          try {
-            writer.write(new TextEncoder().encode(val));
-          } catch (e) {}
+      function evaluate(pts, fw, fh) {
+        var s1 = eyeGap(pts.at(0).x, pts.at(0).y, fw, fh),
+          s2 = eyeGap(pts.at(1).x, pts.at(1).y, fw, fh);
+        var sc = s1 > 0 && s2 > 0 ? (s1 + s2) / 2 : s1 > 0 ? s1 : s2;
+        var dist = fw > 175 ? "Near" : fw < 85 ? "Far" : "Optimal";
+        if (sc < 0) {
+          closedStart = 0;
+          document.getElementById("info").innerText = dist + " | Dark Ignored";
+          return requestAnimationFrame(loop);
         }
-      }
-
-      function processEyes(eyePts, faceWidth) {
-        var leftScore = measureEyelidGap(eyePts[0].x, eyePts[0].y, faceWidth);
-        var rightScore = measureEyelidGap(eyePts[1].x, eyePts[1].y, faceWidth);
-
-        if (leftScore < 0 || rightScore < 0) {
-          closedFrames = 0;
-          document.getElementById("debug").innerText =
-            "Dark Object / Shadow Ignored";
-          requestAnimationFrame(detectLoop);
-          return;
-        }
-
-        var score = (leftScore + rightScore) / 2;
-
-        if (score > 0) {
-          if (learnCount < 10) {
-            openBaseline =
-              (openBaseline * learnCount + score) / (learnCount + 1);
-            learnCount++;
-            statusBox.innerText = "Locking onto Eyes...";
-            statusBox.style.background = "#e8f0fe";
-            statusBox.style.color = "#1a73e8";
+        if (learn < 10) {
+          base = (base * learn + sc) / (learn + 1);
+          learn++;
+          st.innerText = "Locking Eyes...";
+          st.style.background = "#e8f0fe";
+          st.style.color = "#1a73e8";
+        } else {
+          if (sc > base * 0.86) base = base * 0.94 + sc * 0.06;
+          var openPct = Math.round((sc / Math.max(0.1, base)) * 100);
+          if (openPct < 65) {
+            if (closedStart === 0) closedStart = Date.now();
+            var elapsed = (Date.now() - closedStart) / 1000;
+            document.getElementById("info").innerText =
+              dist + " | Closed: " + elapsed.toFixed(1) + "s / 3.0s";
+            if (elapsed >= 3.0) {
+              st.innerText = "WAKE UP!";
+              st.style.background = "#d93025";
+              st.style.color = "#fff";
+              document.getElementById("body").style.background = "#fce8e6";
+              playLoudSiren();
+              sendUSB("1");
+            }
           } else {
-            if (score > openBaseline * 0.88) {
-              openBaseline = openBaseline * 0.96 + score * 0.04;
-            }
-
-            var openness = score / Math.max(0.1, openBaseline);
-            document.getElementById("debug").innerText =
-              "Eyes Locked | Openness: " + Math.round(openness * 100) + "%";
-
-            if (openness < 0.65) {
-              closedFrames++;
-              if (closedFrames > 22) {
-                statusBox.innerText = "WAKE UP!";
-                statusBox.style.background = "#d93025";
-                statusBox.style.color = "white";
-                document.getElementById("pageBody").style.backgroundColor =
-                  "#fce8e6";
-
-                try {
-                  var osc = audio.createOscillator();
-                  osc.type = "square";
-                  osc.frequency.setValueAtTime(950, audio.currentTime);
-                  osc.connect(audio.destination);
-                  osc.start();
-                  osc.stop(audio.currentTime + 0.12);
-                } catch (e) {}
-
-                sendArduino("1");
-              }
-            } else {
-              closedFrames = 0;
-              statusBox.innerText = "Awake";
-              statusBox.style.background = "#e6f4ea";
-              statusBox.style.color = "#137333";
-              document.getElementById("pageBody").style.backgroundColor =
-                "#f8f9fa";
-              sendArduino("0");
-            }
+            closedStart = 0;
+            document.getElementById("info").innerText =
+              dist + " | Openness: " + openPct + "%";
+            st.innerText = "Awake";
+            st.style.background = "#e6f4ea";
+            st.style.color = "#137333";
+            document.getElementById("body").style.background = "#f8f9fa";
+            sendUSB("0");
           }
         }
-        requestAnimationFrame(detectLoop);
+        requestAnimationFrame(loop);
       }
 
-      function detectLoop() {
-        if (video.readyState < 2) {
-          requestAnimationFrame(detectLoop);
-          return;
-        }
-
-        pctx.drawImage(video, 0, 0, 320, 240);
-
-        if (faceDetector) {
-          faceDetector
-            .detect(proc)
-            .then(function (faces) {
+      function loop() {
+        if (vid.readyState < 2) return requestAnimationFrame(loop);
+        ctx.drawImage(vid, 0, 0, 320, 240);
+        if (fd) {
+          fd.detect(c)
+            .then((faces) => {
               if (faces && faces.length > 0) {
-                missingFrames = 0;
-                var face = faces[0];
-                var box = face.boundingBox;
-
-                var cx = box.left + box.width / 2;
-                var cy = box.top + box.height / 2;
-                if (
-                  lastFaceX !== -1 &&
-                  Math.hypot(cx - lastFaceX, cy - lastFaceY) > 55
-                ) {
-                  resetForNewPerson();
+                miss = 0;
+                var f = faces.at(0),
+                  b = f.boundingBox,
+                  cx = b.left + b.width / 2,
+                  cy = b.top + b.height / 2;
+                if (lx !== -1 && Math.hypot(cx - lx, cy - ly) > 85) {
+                  learn = 0;
+                  base = 0;
+                  closedStart = 0;
                 }
-                lastFaceX = cx;
-                lastFaceY = cy;
-
-                var eyePts = [
-                  {
-                    x: box.left + box.width * 0.34,
-                    y: box.top + box.height * 0.37,
-                  },
-                  {
-                    x: box.left + box.width * 0.66,
-                    y: box.top + box.height * 0.37,
-                  },
-                ];
-                processEyes(eyePts, box.width);
+                if (lw !== -1 && Math.abs(b.width - lw) > 15 && learn >= 10)
+                  learn = 5;
+                lx = cx;
+                ly = cy;
+                lw = b.width;
+                var eyes = (f.landmarks || []).filter((l) => l.type === "eye");
+                var pts =
+                  eyes.length >= 2
+                    ? [eyes.at(0).locations.at(0), eyes.at(1).locations.at(0)]
+                    : [
+                        {
+                          x: b.left + b.width * 0.34,
+                          y: b.top + b.height * 0.37,
+                        },
+                        {
+                          x: b.left + b.width * 0.66,
+                          y: b.top + b.height * 0.37,
+                        },
+                      ];
+                evaluate(pts, b.width, b.height);
               } else {
-                missingFrames++;
-                closedFrames = 0;
-                if (missingFrames > 10) {
-                  resetForNewPerson();
-                  lastFaceX = -1;
-                  lastFaceY = -1;
+                if (++miss > 10) {
+                  learn = 0;
+                  base = 0;
+                  closedStart = 0;
+                  lx = -1;
+                  ly = -1;
+                  lw = -1;
                 }
-                statusBox.innerText = "Waiting for Driver...";
-                statusBox.style.background = "#fef7e0";
-                statusBox.style.color = "#b06000";
-                document.getElementById("debug").innerText =
-                  "Scanning for Face...";
-                document.getElementById("pageBody").style.backgroundColor =
-                  "#f8f9fa";
-                sendArduino("0");
-                requestAnimationFrame(detectLoop);
+                st.innerText = "Waiting for Driver...";
+                st.style.background = "#fef7e0";
+                st.style.color = "#b06000";
+                document.getElementById("info").innerText =
+                  "Scanning All Angles...";
+                document.getElementById("body").style.background = "#f8f9fa";
+                sendUSB("0");
+                requestAnimationFrame(loop);
               }
             })
-            .catch(function () {
-              faceDetector = null;
-              requestAnimationFrame(detectLoop);
+            .catch(() => {
+              fd = null;
+              requestAnimationFrame(loop);
             });
         } else {
-          processEyes(
+          evaluate(
             [
               { x: 120, y: 95 },
               { x: 200, y: 95 },
             ],
+            140,
             140,
           );
         }
