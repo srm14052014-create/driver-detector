@@ -1,349 +1,247 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
-  <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Sleeping Driver Detector</title>
-  </head>
-  <body
-    id="pageBody"
-    style="
-      font-family: sans-serif;
-      text-align: center;
-      padding: 16px;
-      margin: 0;
-      background-color: #f8f9fa;
-      transition: 0.2s;
-    "
-  >
-    <h2 style="margin: 8px 0 14px 0; color: #202124">
-      Sleeping Driver Detector
-    </h2>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sleeping Driver Detector</title>
+</head>
+<body id="pageBody" style="font-family: sans-serif; text-align: center; padding: 16px; margin: 0; background-color: #f8f9fa; transition: 0.2s;">
+  <h2 style="margin: 8px 0 14px 0; color: #202124;">Sleeping Driver Detector</h2>
+  
+  <button id="startBtn" onclick="startCamera()" style="width: 95%; max-width: 340px; padding: 16px; font-size: 18px; font-weight: bold; background: #1a73e8; color: white; border: none; border-radius: 12px; margin-bottom: 10px; cursor: pointer;">1. Start Auto Detection</button>
+  
+  <button onclick="connectArduino()" style="width: 95%; max-width: 340px; padding: 11px; font-size: 14px; background: #e8eaed; color: #333; border: none; border-radius: 10px; margin-bottom: 12px; cursor: pointer;">2. Connect Arduino (Optional)</button>
+  
+  <div id="status" style="width: 95%; max-width: 340px; margin: 0 auto 12px auto; padding: 12px; border-radius: 10px; background: #e6f4ea; color: #137333; font-size: 20px; font-weight: bold;">Ready! Tap Start</div>
+  
+  <div style="width: 260px; height: 260px; margin: 0 auto;">
+    <video id="webcam" autoplay playsinline muted style="width: 260px; height: 260px; object-fit: cover; border-radius: 16px; transform: scaleX(-1); background: #000;"></video>
+  </div>
+  
+  <div id="debug" style="margin-top: 10px; font-size: 15px; font-weight: bold; color: #444;">Eye Lock: Ready</div>
+  <canvas id="proc" width="320" height="240" style="display:none;"></canvas>
 
-    <button
-      id="startBtn"
-      onclick="startCamera()"
-      style="
-        width: 95%;
-        max-width: 340px;
-        padding: 16px;
-        font-size: 18px;
-        font-weight: bold;
-        background: #1a73e8;
-        color: white;
-        border: none;
-        border-radius: 12px;
-        margin-bottom: 10px;
-        cursor: pointer;
-      "
-    >
-      1. Start Auto Detection
-    </button>
+  <script>
+    let writer, closedFrames = 0, openBaseline = 0, learnCount = 0;
+    let missingFrames = 0, lastFaceCenterX = -1, lastFaceCenterY = -1;
+    let faceDetector = null;
+    let audio = null;
 
-    <button
-      onclick="connectArduino()"
-      style="
-        width: 95%;
-        max-width: 340px;
-        padding: 11px;
-        font-size: 14px;
-        background: #e8eaed;
-        color: #333;
-        border: none;
-        border-radius: 10px;
-        margin-bottom: 12px;
-        cursor: pointer;
-      "
-    >
-      2. Connect Arduino (Optional)
-    </button>
+    const video = document.getElementById("webcam");
+    const proc = document.getElementById("proc");
+    const pctx = proc.getContext("2d", { willReadFrequently: true });
+    const statusBox = document.getElementById("status");
 
-    <div
-      id="status"
-      style="
-        width: 95%;
-        max-width: 340px;
-        margin: 0 auto 12px auto;
-        padding: 12px;
-        border-radius: 10px;
-        background: #e6f4ea;
-        color: #137333;
-        font-size: 20px;
-        font-weight: bold;
-      "
-    >
-      Ready! Tap Start
-    </div>
+    try {
+      if ("FaceDetector" in window) {
+        faceDetector = new FaceDetector({ fastMode: false, maxDetectedFaces: 1 });
+      }
+    } catch (err) {
+      faceDetector = null;
+    }
 
-    <div style="width: 260px; height: 260px; margin: 0 auto">
-      <video
-        id="webcam"
-        autoplay
-        playsinline
-        muted
-        style="
-          width: 260px;
-          height: 260px;
-          object-fit: cover;
-          border-radius: 16px;
-          transform: scaleX(-1);
-          background: #000;
-        "
-      ></video>
-    </div>
-
-    <div
-      id="debug"
-      style="margin-top: 10px; font-size: 15px; font-weight: bold; color: #444"
-    >
-      Eye Lock: Ready
-    </div>
-    <canvas id="proc" width="320" height="240" style="display: none"></canvas>
-
-    <script>
-      let writer,
-        closedFrames = 0,
-        openBaseline = 0,
-        learnCount = 0;
-      let missingFrames = 0,
-        lastFaceCenterX = -1,
-        lastFaceCenterY = -1;
-      let faceDetector = null;
-      let audio = null;
-
-      const video = document.getElementById("webcam");
-      const proc = document.getElementById("proc");
-      const pctx = proc.getContext("2d", { willReadFrequently: true });
-      const statusBox = document.getElementById("status");
-
+    async function connectArduino() {
       try {
-        if ("FaceDetector" in window) {
-          faceDetector = new FaceDetector({
-            fastMode: false,
-            maxDetectedFaces: 1,
-          });
+        const port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 9600 });
+        writer = port.writable.getWriter();
+        alert("Arduino Nano Connected!");
+      } catch (e) {
+        alert("No Arduino connected. Using mobile speaker alarm.");
+      }
+    }
+
+    // Returns -1 if a black object/hair/shadow is blocking the eye; otherwise returns eyelid openness score
+    function measureEyelidGap(cx, cy, faceWidth) {
+      const rx = Math.max(5, Math.round(faceWidth * 0.065));
+      const ry = Math.max(4, Math.round(faceWidth * 0.05));
+      const x0 = Math.max(1, Math.round(cx - rx));
+      const y0 = Math.max(1, Math.round(cy - ry));
+      const w = Math.min(318 - x0, rx * 2);
+      const h = Math.min(238 - y0, ry * 2);
+      if (w <= 2 || h <= 2) return -1;
+
+      const data = pctx.getImageData(x0, y0, w, h).data;
+      let verticalEdge = 0;
+      let validPixels = 0;
+      let skinOrEyePixels = 0;
+      const totalPixels = w * h;
+
+      // 1. Check that real skin/eyelid is visible (rejects black objects, dark hair, and shadows)
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data.at(i), g = data.at(i + 1), b = data.at(i + 2);
+        const lum = r * 0.299 + g * 0.587 + b * 0.114;
+        // Skin tone or bright white sclera (not black!)
+        if (lum > 45 && ((r > g && g >= b) || lum > 150)) {
+          skinOrEyePixels++;
         }
+      }
+
+      // If less than 40% of the eye box is skin/eyeball, something black/dark is blocking it
+      if (skinOrEyePixels < totalPixels * 0.40) {
+        return -1;
+      }
+
+      // 2. Measure vertical eyelid gap
+      for (let y = 0; y < h - 1; y++) {
+        for (let x = 0; x < w; x++) {
+          const iTop = (y * w + x) * 4;
+          const iBot = ((y + 1) * w + x) * 4;
+          const lumTop = data.at(iTop) * 0.299 + data.at(iTop + 1) * 0.587 + data.at(iTop + 2) * 0.114;
+          const lumBot = data.at(iBot) * 0.299 + data.at(iBot + 1) * 0.587 + data.at(iBot + 2) * 0.114;
+
+          if (lumTop > 35 && lumBot > 35) {
+            verticalEdge += Math.abs(lumTop - lumBot);
+            validPixels++;
+          }
+        }
+      }
+      return validPixels > 0 ? verticalEdge / validPixels : -1;
+    }
+
+    function resetForNewPerson() {
+      learnCount = 0;
+      openBaseline = 0;
+      closedFrames = 0;
+    }
+
+    async function startCamera() {
+      try {
+        statusBox.innerText = "Opening Camera...";
+        if (!audio) {
+          audio = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audio.state === 'suspended') {
+          await audio.resume();
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user", width: 320, height: 240 },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+        resetForNewPerson();
+        detectLoop();
       } catch (err) {
-        faceDetector = null;
+        statusBox.innerText = "Error: " + err.message;
+        statusBox.style.background = "#fce8e6";
+        statusBox.style.color = "#d93025";
       }
+    }
 
-      async function connectArduino() {
-        try {
-          const port = await navigator.serial.requestPort();
-          await port.open({ baudRate: 9600 });
-          writer = port.writable.getWriter();
-          alert("Arduino Nano Connected!");
-        } catch (e) {
-          alert("No Arduino connected. Using mobile speaker alarm.");
-        }
-      }
+    async function detectLoop() {
+      if (video.readyState >= 2) {
+        pctx.drawImage(video, 0, 0, 320, 240);
 
-      function measureEyelidGap(cx, cy, faceWidth) {
-        const rx = Math.max(5, Math.round(faceWidth * 0.065));
-        const ry = Math.max(4, Math.round(faceWidth * 0.05));
-        const x0 = Math.max(1, Math.round(cx - rx));
-        const y0 = Math.max(1, Math.round(cy - ry));
-        const w = Math.min(318 - x0, rx * 2);
-        const h = Math.min(238 - y0, ry * 2);
-        if (w <= 2 || h <= 2) return 0;
+        let eyePts = [];
+        let faceWidth = 140;
+        let faceDetected = false;
 
-        const data = pctx.getImageData(x0, y0, w, h).data;
-        let verticalEdge = 0;
-        let validPixels = 0;
+        if (faceDetector) {
+          try {
+            const faces = await faceDetector.detect(proc);
+            if (faces.length > 0) {
+              faceDetected = true;
+              missingFrames = 0;
+              const face = faces.at(0);
+              const box = face.boundingBox;
+              faceWidth = box.width;
 
-        for (let y = 0; y < h - 1; y++) {
-          for (let x = 0; x < w; x++) {
-            const iTop = (y * w + x) * 4;
-            const iBot = ((y + 1) * w + x) * 4;
-            const lumTop =
-              data.at(iTop) * 0.299 +
-              data.at(iTop + 1) * 0.587 +
-              data.at(iTop + 2) * 0.114;
-            const lumBot =
-              data.at(iBot) * 0.299 +
-              data.at(iBot + 1) * 0.587 +
-              data.at(iBot + 2) * 0.114;
-
-            if (lumTop > 22 && lumBot > 22) {
-              verticalEdge += Math.abs(lumTop - lumBot);
-              validPixels++;
-            }
-          }
-        }
-        return validPixels > 0 ? verticalEdge / validPixels : 0;
-      }
-
-      function resetForNewPerson() {
-        learnCount = 0;
-        openBaseline = 0;
-        closedFrames = 0;
-      }
-
-      async function startCamera() {
-        try {
-          statusBox.innerText = "Opening Camera...";
-          if (!audio) {
-            audio = new (window.AudioContext || window.webkitAudioContext)();
-          }
-          if (audio.state === "suspended") {
-            await audio.resume();
-          }
-
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "user", width: 320, height: 240 },
-            audio: false,
-          });
-          video.srcObject = stream;
-          await video.play();
-          resetForNewPerson();
-          detectLoop();
-        } catch (err) {
-          statusBox.innerText = "Error: " + err.message;
-          statusBox.style.background = "#fce8e6";
-          statusBox.style.color = "#d93025";
-        }
-      }
-
-      async function detectLoop() {
-        if (video.readyState >= 2) {
-          pctx.drawImage(video, 0, 0, 320, 240);
-
-          let eyePts = [];
-          let faceWidth = 140;
-          let faceDetected = false;
-
-          if (faceDetector) {
-            try {
-              const faces = await faceDetector.detect(proc);
-              if (faces.length > 0) {
-                faceDetected = true;
-                missingFrames = 0;
-                const face = faces.at(0);
-                const box = face.boundingBox;
-                faceWidth = box.width;
-
-                // Detect if a new person stepped in front of the camera
-                const centerX = box.left + box.width / 2;
-                const centerY = box.top + box.height / 2;
-                if (lastFaceCenterX !== -1) {
-                  const shift = Math.hypot(
-                    centerX - lastFaceCenterX,
-                    centerY - lastFaceCenterY,
-                  );
-                  if (shift > 55) {
-                    resetForNewPerson();
-                  }
-                }
-                lastFaceCenterX = centerX;
-                lastFaceCenterY = centerY;
-
-                // Lock onto exact eye landmarks
-                const eyes = (face.landmarks || []).filter(
-                  (l) => l.type === "eye",
-                );
-                if (eyes.length >= 2) {
-                  eyePts = [
-                    eyes.at(0).locations.at(0),
-                    eyes.at(1).locations.at(0),
-                  ];
-                } else {
-                  eyePts = [
-                    {
-                      x: box.left + box.width * 0.34,
-                      y: box.top + box.height * 0.37,
-                    },
-                    {
-                      x: box.left + box.width * 0.66,
-                      y: box.top + box.height * 0.37,
-                    },
-                  ];
+              const centerX = box.left + box.width / 2;
+              const centerY = box.top + box.height / 2;
+              if (lastFaceCenterX !== -1) {
+                const shift = Math.hypot(centerX - lastFaceCenterX, centerY - lastFaceCenterY);
+                if (shift > 55) {
+                  resetForNewPerson();
                 }
               }
-            } catch (e) {
-              faceDetector = null;
-            }
-          }
+              lastFaceCenterX = centerX;
+              lastFaceCenterY = centerY;
 
-          if (!faceDetector) {
-            faceDetected = true;
-            eyePts = [
-              { x: 120, y: 95 },
-              { x: 200, y: 95 },
-            ];
-          }
-
-          if (faceDetected && eyePts.length === 2) {
-            const score =
-              (measureEyelidGap(eyePts.at(0).x, eyePts.at(0).y, faceWidth) +
-                measureEyelidGap(eyePts.at(1).x, eyePts.at(1).y, faceWidth)) /
-              2;
-
-            if (score > 0) {
-              // Fast 10-frame (~0.4s) auto-lock for any new person
-              if (learnCount < 10) {
-                openBaseline =
-                  (openBaseline * learnCount + score) / (learnCount + 1);
-                learnCount++;
-                statusBox.innerText = "Locking onto Eyes...";
-                statusBox.style.background = "#e8f0fe";
-                statusBox.style.color = "#1a73e8";
+              const eyes = (face.landmarks || []).filter(l => l.type === "eye");
+              if (eyes.length >= 2) {
+                eyePts = [eyes.at(0).locations.at(0), eyes.at(1).locations.at(0)];
               } else {
-                if (score > openBaseline * 0.88) {
-                  openBaseline = openBaseline * 0.96 + score * 0.04;
-                }
-
-                const openness = score / Math.max(0.1, openBaseline);
-                document.getElementById("debug").innerText =
-                  "Eyes Locked | Openness: " + Math.round(openness * 100) + "%";
-
-                if (openness < 0.65) {
-                  closedFrames++;
-                  if (closedFrames > 22) {
-                    statusBox.innerText = "WAKE UP!";
-                    statusBox.style.background = "#d93025";
-                    statusBox.style.color = "white";
-                    document.getElementById("pageBody").style.backgroundColor =
-                      "#fce8e6";
-
-                    let osc = audio.createOscillator();
-                    osc.type = "square";
-                    osc.frequency.setValueAtTime(950, audio.currentTime);
-                    osc.connect(audio.destination);
-                    osc.start();
-                    osc.stop(audio.currentTime + 0.12);
-
-                    if (writer) writer.write(new TextEncoder().encode("1"));
-                  }
-                } else {
-                  closedFrames = 0;
-                  statusBox.innerText = "Awake";
-                  statusBox.style.background = "#e6f4ea";
-                  statusBox.style.color = "#137333";
-                  document.getElementById("pageBody").style.backgroundColor =
-                    "#f8f9fa";
-                  if (writer) writer.write(new TextEncoder().encode("0"));
-                }
+                eyePts = [
+                  { x: box.left + box.width * 0.34, y: box.top + box.height * 0.37 },
+                  { x: box.left + box.width * 0.66, y: box.top + box.height * 0.37 }
+                ];
               }
             }
-          } else {
-            missingFrames++;
-            // Reset automatically as soon as someone steps away so it is ready for the next person
-            if (missingFrames > 10) {
-              resetForNewPerson();
-              lastFaceCenterX = -1;
-              lastFaceCenterY = -1;
-            }
-            statusBox.innerText = "Waiting for Driver...";
-            statusBox.style.background = "#fef7e0";
-            statusBox.style.color = "#b06000";
-            document.getElementById("debug").innerText =
-              "Eye Lock: Scanning for Face...";
-            document.getElementById("pageBody").style.backgroundColor =
-              "#f8f9fa";
-            if (writer) writer.write(new TextEncoder().encode("0"));
-          }
+          } catch (e) {}
         }
-        requestAnimationFrame(detectLoop);
+
+        if (faceDetected && eyePts.length === 2) {
+          const leftScore = measureEyelidGap(eyePts.at(0).x, eyePts.at(0).y, faceWidth);
+          const rightScore = measureEyelidGap(eyePts.at(1).x, eyePts.at(1).y, faceWidth);
+
+          // If a black object is blocking either eye, pause alarm instead of false-triggering
+          if (leftScore < 0 || rightScore < 0) {
+            closedFrames = 0;
+            document.getElementById("debug").innerText = "Eyes Blocked / Dark Shadow Ignored";
+            requestAnimationFrame(detectLoop);
+            return;
+          }
+
+          const score = (leftScore + rightScore) / 2;
+
+          if (score > 0) {
+            if (learnCount < 10) {
+              openBaseline = (openBaseline * learnCount + score) / (learnCount + 1);
+              learnCount++;
+              statusBox.innerText = "Locking onto Eyes...";
+              statusBox.style.background = "#e8f0fe";
+              statusBox.style.color = "#1a73e8";
+            } else {
+              if (score > openBaseline * 0.88) {
+                openBaseline = openBaseline * 0.96 + score * 0.04;
+              }
+
+              const openness = score / Math.max(0.1, openBaseline);
+              document.getElementById("debug").innerText = "Eyes Locked | Openness: " + Math.round(openness * 100) + "%";
+
+              if (openness < 0.65) {
+                closedFrames++;
+                if (closedFrames > 22) {
+                  statusBox.innerText = "WAKE UP!";
+                  statusBox.style.background = "#d93025";
+                  statusBox.style.color = "white";
+                  document.getElementById("pageBody").style.backgroundColor = "#fce8e6";
+
+                  let osc = audio.createOscillator();
+                  osc.type = "square";
+                  osc.frequency.setValueAtTime(950, audio.currentTime);
+                  osc.connect(audio.destination);
+                  osc.start();
+                  osc.stop(audio.currentTime + 0.12);
+
+                  if (writer) writer.write(new TextEncoder().encode("1"));
+                }
+              } else {
+                closedFrames = 0;
+                statusBox.innerText = "Awake";
+                statusBox.style.background = "#e6f4ea";
+                statusBox.style.color = "#137333";
+                document.getElementById("pageBody").style.backgroundColor = "#f8f9fa";
+                if (writer) writer.write(new TextEncoder().encode("0"));
+              }
+            }
+          }
+        } else {
+          missingFrames++;
+          closedFrames = 0;
+          if (missingFrames > 10) {
+            resetForNewPerson();
+            lastFaceCenterX = -1;
+            lastFaceCenterY = -1;
+          }
+          statusBox.innerText = "Waiting for Driver...";
+          statusBox.style.background = "#fef7e0";
+          statusBox.style.color = "#b06000";
+          document.getElementById("debug").innerText = "Eye Lock: Scanning for Face...";
+          document.getElementById("pageBody").style.backgroundColor = "#f8f9fa";
+          if (writer) writer.write(new TextEncoder().encode("0"));
+        }
       }
-    </script>
-  </body>
-</html>
+requestAnimationFrame(detectLoop);
+}
