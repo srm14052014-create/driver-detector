@@ -108,8 +108,19 @@
 
       try {
         if (window.FaceDetector)
-          fd = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
-      } catch (e) {}
+          fd = new window.FaceDetector({
+            fastMode: false,
+            maxDetectedFaces: 1,
+          });
+      } catch (e) {
+        try {
+          if (window.FaceDetector)
+            fd = new window.FaceDetector({
+              fastMode: true,
+              maxDetectedFaces: 1,
+            });
+        } catch (e2) {}
+      }
 
       function connectUSB() {
         if (!navigator.serial) return alert("Using mobile speaker alarm.");
@@ -150,41 +161,47 @@
         } catch (e) {}
       }
 
-      function eyeGap(cx, cy, fw, fh) {
-        var rx = Math.max(6, Math.round(fw * 0.08)),
-          ry = Math.max(5, Math.round(fh * 0.06));
-        var x0 = Math.max(1, Math.round(cx - rx)),
-          y0 = Math.max(1, Math.round(cy - ry));
-        var w = Math.min(318 - x0, rx * 2),
-          h = Math.min(238 - y0, ry * 2);
-        if (w <= 3 || h <= 3) return -1;
-        var d = ctx.getImageData(x0, y0, w, h).data,
-          edge = 0,
-          valid = 0,
-          skin = 0;
+      // High-accuracy Iris (dark center) + Sclera (bright white) contrast detector
+      function analyzeEye(cx, cy, fw, fh) {
+        var rx = Math.max(7, Math.round(fw * 0.085));
+        var ry = Math.max(5, Math.round(fh * 0.055));
+        var x0 = Math.max(1, Math.round(cx - rx));
+        var y0 = Math.max(1, Math.round(cy - ry));
+        var w = Math.min(318 - x0, rx * 2);
+        var h = Math.min(238 - y0, ry * 2);
+        if (w <= 4 || h <= 4) return -1;
+
+        var d = ctx.getImageData(x0, y0, w, h).data;
+        var lums = [];
+        var skinCount = 0;
+
         for (var i = 0; i < d.length; i += 4) {
           var r = d.at(i),
             g = d.at(i + 1),
-            b = d.at(i + 2),
-            lum = r * 0.299 + g * 0.587 + b * 0.114;
-          if (lum > 42 && ((r > g && g >= b) || lum > 145)) skin++;
+            b = d.at(i + 2);
+          var lum = r * 0.299 + g * 0.587 + b * 0.114;
+          lums.push(lum);
+          if (lum > 45 && ((r > g && g >= b) || lum > 140)) skinCount++;
         }
-        if (skin < w * h * 0.35) return -1;
-        for (var y = 0; y < h - 1; y++) {
-          for (var x = 0; x < w; x++) {
-            var i1 = (y * w + x) * 4,
-              i2 = ((y + 1) * w + x) * 4;
-            var l1 =
-              d.at(i1) * 0.299 + d.at(i1 + 1) * 0.587 + d.at(i1 + 2) * 0.114;
-            var l2 =
-              d.at(i2) * 0.299 + d.at(i2 + 1) * 0.587 + d.at(i2 + 2) * 0.114;
-            if (l1 > 32 && l2 > 32) {
-              edge += Math.abs(l1 - l2);
-              valid++;
-            }
-          }
+
+        // Reject black objects, hair, or heavy shadows covering the eye
+        if (skinCount < lums.length * 0.35) return -1;
+
+        // Sort brightness values to compare brightest 15% (sclera/highlight) vs darkest 15% (iris/pupil)
+        lums.sort((a, b) => a - b);
+        var slice = Math.max(2, Math.floor(lums.length * 0.15));
+        var darkSum = 0,
+          brightSum = 0;
+        for (var j = 0; j < slice; j++) {
+          darkSum += lums.at(j);
+          brightSum += lums.at(lums.length - 1 - j);
         }
-        return valid > 0 ? (edge / valid) * (h / 12) : -1;
+
+        var darkAvg = darkSum / slice;
+        var brightAvg = brightSum / slice;
+
+        // Open eye has high contrast between dark pupil and bright eye white; closed eyelid is uniform skin
+        return brightAvg - darkAvg;
       }
 
       function start() {
@@ -215,25 +232,37 @@
       }
 
       function evaluate(pts, fw, fh) {
-        var s1 = eyeGap(pts.at(0).x, pts.at(0).y, fw, fh),
-          s2 = eyeGap(pts.at(1).x, pts.at(1).y, fw, fh);
-        var sc = s1 > 0 && s2 > 0 ? (s1 + s2) / 2 : s1 > 0 ? s1 : s2;
-        var dist = fw > 175 ? "Near" : fw < 85 ? "Far" : "Optimal";
-        if (sc < 0) {
+        var s1 = analyzeEye(pts.at(0).x, pts.at(0).y, fw, fh);
+        var s2 = analyzeEye(pts.at(1).x, pts.at(1).y, fw, fh);
+
+        // Require BOTH eyes to agree before triggering alarm (prevents false alarms when turning head)
+        if (s1 < 0 || s2 < 0) {
           closedStart = 0;
-          document.getElementById("info").innerText = dist + " | Dark Ignored";
+          document.getElementById("info").innerText =
+            "Blocked / Dark Shadow Ignored";
           return requestAnimationFrame(loop);
         }
-        if (learn < 10) {
+
+        var sc = (s1 + s2) / 2;
+        var dist = fw > 175 ? "Near" : fw < 85 ? "Far" : "Optimal";
+
+        if (learn < 15) {
           base = (base * learn + sc) / (learn + 1);
           learn++;
-          st.innerText = "Locking Eyes...";
+          st.innerText =
+            "Locking Eyes (" + Math.round((learn / 15) * 100) + "%)";
           st.style.background = "#e8f0fe";
           st.style.color = "#1a73e8";
         } else {
-          if (sc > base * 0.86) base = base * 0.94 + sc * 0.06;
-          var openPct = Math.round((sc / Math.max(0.1, base)) * 100);
-          if (openPct < 65) {
+          // Only adapt baseline when eyes are clearly wide open (prevents drifting down during blinks)
+          if (sc > base * 0.92 && closedStart === 0) {
+            base = base * 0.97 + sc * 0.03;
+          }
+
+          var openPct = Math.round((sc / Math.max(1, base)) * 100);
+
+          // Trigger timer only when eye contrast drops below 58% of open baseline
+          if (openPct < 58) {
             if (closedStart === 0) closedStart = Date.now();
             var elapsed = (Date.now() - closedStart) / 1000;
             document.getElementById("info").innerText =
@@ -249,7 +278,7 @@
           } else {
             closedStart = 0;
             document.getElementById("info").innerText =
-              dist + " | Openness: " + openPct + "%";
+              dist + " | Eye Openness: " + Math.min(100, openPct) + "%";
             st.innerText = "Awake";
             st.style.background = "#e6f4ea";
             st.style.color = "#137333";
@@ -277,8 +306,6 @@
                   base = 0;
                   closedStart = 0;
                 }
-                if (lw !== -1 && Math.abs(b.width - lw) > 15 && learn >= 10)
-                  learn = 5;
                 lx = cx;
                 ly = cy;
                 lw = b.width;
@@ -310,7 +337,7 @@
                 st.style.background = "#fef7e0";
                 st.style.color = "#b06000";
                 document.getElementById("info").innerText =
-                  "Scanning All Angles...";
+                  "Scanning for Face...";
                 document.getElementById("body").style.background = "#f8f9fa";
                 sendUSB("0");
                 requestAnimationFrame(loop);
