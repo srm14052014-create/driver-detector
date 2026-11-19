@@ -5,11 +5,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, user-scalable=no"
     />
-    <title>Sleeping Driver Detector</title>
-    <script src="https://jsdelivr.net"></script>
-    <script src="https://jsdelivr.net"></script>
-    <script src="https://jsdelivr.net"></script>
-    <script src="https://jsdelivr.net"></script>
+    <title>Driver Detector</title>
   </head>
   <body
     id="body"
@@ -23,7 +19,6 @@
   >
     <h3 style="margin: 6px 0 10px">Sleeping Driver Detector</h3>
     <button
-      id="btn"
       onclick="start()"
       style="
         width: 92%;
@@ -70,7 +65,7 @@
         font-weight: bold;
       "
     >
-      Ready! Tap Start
+      Ready! Instant Start
     </div>
     <video
       id="vid"
@@ -92,16 +87,29 @@
     >
       Waiting...
     </div>
+    <canvas id="c" width="320" height="240" style="display: none"></canvas>
 
     <script>
-      var detector = null,
-        writer = null,
+      var writer = null,
         closedStart = 0,
+        openRef = 0,
+        calFrames = 0,
+        miss = 0,
+        lx = -1,
+        ly = -1,
+        fd = null,
         audio = null,
         sirenTick = 0;
       var vid = document.getElementById("vid"),
+        c = document.getElementById("c"),
+        ctx = c.getContext("2d", { willReadFrequently: true }),
         st = document.getElementById("status"),
         info = document.getElementById("info");
+
+      try {
+        if (window.FaceDetector)
+          fd = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+      } catch (e) {}
 
       function connectUSB() {
         if (!navigator.serial) return alert("Using mobile speaker alarm.");
@@ -144,100 +152,203 @@
         } catch (e) {}
       }
 
-      function dist(a, b) {
-        return Math.hypot(a.x - b.x, a.y - b.y);
+      // Measures center-row pupil darkness relative to surrounding eyelid skin (immune to external black objects)
+      function measureEye(cx, cy, fw, fh) {
+        var rx = Math.max(8, Math.round(fw * 0.09));
+        var ry = Math.max(6, Math.round(fh * 0.06));
+        var x0 = Math.max(1, Math.round(cx - rx));
+        var y0 = Math.max(1, Math.round(cy - ry));
+        var w = Math.min(318 - x0, rx * 2);
+        var h = Math.min(238 - y0, ry * 2);
+        if (w <= 4 || h <= 4) return -1;
+
+        var d = ctx.getImageData(x0, y0, w, h).data;
+        var borderSum = 0,
+          borderCount = 0,
+          centerMin = 255,
+          skinPixels = 0;
+
+        for (var y = 0; y < h; y++) {
+          for (var x = 0; x < w; x++) {
+            var i = (y * w + x) * 4;
+            var r = d.at(i),
+              g = d.at(i + 1),
+              b = d.at(i + 2);
+            var lum = r * 0.299 + g * 0.587 + b * 0.114;
+
+            if (lum > 45 && ((r > g && g >= b) || lum > 140)) skinPixels++;
+
+            // Outer skin ring around the eye
+            if (y < 2 || y >= h - 2 || x < 2 || x >= w - 2) {
+              borderSum += lum;
+              borderCount++;
+            } else if (
+              x > w * 0.3 &&
+              x < w * 0.7 &&
+              y > h * 0.25 &&
+              y < h * 0.75
+            ) {
+              // Center pupil zone
+              if (lum < centerMin) centerMin = lum;
+            }
+          }
+        }
+
+        // Reject if black object/hair covers the eye box
+        if (skinPixels < w * h * 0.4 || borderCount === 0) return -1;
+
+        var skinAvg = borderSum / borderCount;
+        // Open eye has dark pupil inside bright skin (high ratio); closed eyelid is uniform skin (low ratio)
+        return (skinAvg - centerMin) / Math.max(20, skinAvg);
       }
 
-      async function start() {
+      function start() {
+        st.innerText = "Opening Camera...";
         try {
-          st.innerText = "Opening Camera...";
           if (!audio)
             audio = new (window.AudioContext || window.webkitAudioContext)();
-          if (audio.state === "suspended") await audio.resume();
-
-          var stream = await navigator.mediaDevices.getUserMedia({
+          if (audio.state === "suspended") audio.resume();
+        } catch (e) {}
+        navigator.mediaDevices
+          .getUserMedia({
             video: { facingMode: "user", width: 320, height: 240 },
             audio: false,
+          })
+          .then(function (s) {
+            vid.srcObject = s;
+            return vid.play();
+          })
+          .then(function () {
+            calFrames = 0;
+            openRef = 0;
+            closedStart = 0;
+            loop();
+          })
+          .catch(function (e) {
+            st.innerText = "Error: " + e.message;
           });
-          vid.srcObject = stream;
-          await vid.play();
-
-          if (!detector) {
-            st.innerText = "Loading Eye AI (3s)...";
-            await tf.setBackend("webgl");
-            detector = await faceLandmarksDetection.createDetector(
-              faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
-              { runtime: "tfjs", refineLandmarks: false, maxFaces: 1 },
-            );
-          }
-
-          st.innerText = "Awake";
-          loop();
-        } catch (err) {
-          st.innerText = "Error: " + err.message;
-          st.style.background = "#fce8e6";
-          st.style.color = "#d93025";
-        }
       }
 
-      async function loop() {
-        if (vid.readyState >= 2 && detector) {
-          try {
-            var faces = await detector.estimateFaces(vid, {
-              flipHorizontal: false,
-            });
-            if (faces && faces.length > 0) {
-              var kp = faces.at(0).keypoints;
+      function process(pts, fw, fh) {
+        var e1 = measureEye(pts.at(0).x, pts.at(0).y, fw, fh);
+        var e2 = measureEye(pts.at(1).x, pts.at(1).y, fw, fh);
 
-              // Exact 3D eyelid landmarks (Left: 159, 145, 33, 133 | Right: 386, 374, 362, 263)
-              var leftEAR =
-                dist(kp.at(159), kp.at(145)) /
-                Math.max(1, dist(kp.at(33), kp.at(133)));
-              var rightEAR =
-                dist(kp.at(386), kp.at(374)) /
-                Math.max(1, dist(kp.at(362), kp.at(263)));
-              var ear = (leftEAR + rightEAR) / 2;
+        if (e1 < 0 || e2 < 0) {
+          closedStart = 0;
+          info.innerText = "Dark Object / Shadow Ignored";
+          return requestAnimationFrame(loop);
+        }
 
-              // Trigger 3-second timer when Eye Aspect Ratio drops below 0.21
-              if (ear < 0.21) {
-                if (closedStart === 0) closedStart = Date.now();
-                var elapsed = (Date.now() - closedStart) / 1000;
-                info.innerText =
-                  "EAR: " +
-                  ear.toFixed(2) +
-                  " | Closed: " +
-                  elapsed.toFixed(1) +
-                  "s / 3.0s";
+        var val = (e1 + e2) / 2;
+        var dist = fw > 175 ? "Near" : fw < 85 ? "Far" : "Optimal";
 
-                if (elapsed >= 3.0) {
-                  st.innerText = "WAKE UP!";
-                  st.style.background = "#d93025";
-                  st.style.color = "#fff";
-                  document.getElementById("body").style.background = "#fce8e6";
-                  playLoudSiren();
-                  sendUSB("1");
-                }
-              } else {
-                closedStart = 0;
-                info.innerText = "Eyes Locked | EAR: " + ear.toFixed(2);
-                st.innerText = "Awake";
-                st.style.background = "#e6f4ea";
-                st.style.color = "#137333";
-                document.getElementById("body").style.background = "#f8f9fa";
-                sendUSB("0");
-              }
-            } else {
-              closedStart = 0;
-              st.innerText = "Waiting for Driver...";
-              st.style.background = "#fef7e0";
-              st.style.color = "#b06000";
-              info.innerText = "Show face to camera";
-              document.getElementById("body").style.background = "#f8f9fa";
-              sendUSB("0");
+        if (calFrames < 12) {
+          openRef = (openRef * calFrames + val) / (calFrames + 1);
+          calFrames++;
+          st.innerText = "Locking Eyes...";
+          st.style.background = "#e8f0fe";
+          st.style.color = "#1a73e8";
+        } else {
+          if (val > openRef * 0.9 && closedStart === 0) {
+            openRef = openRef * 0.96 + val * 0.04;
+          }
+
+          var openPct = Math.round((val / Math.max(0.05, openRef)) * 100);
+
+          if (openPct < 62) {
+            if (closedStart === 0) closedStart = Date.now();
+            var elapsed = (Date.now() - closedStart) / 1000;
+            info.innerText =
+              dist + " | Closed: " + elapsed.toFixed(1) + "s / 3.0s";
+            if (elapsed >= 3.0) {
+              st.innerText = "WAKE UP!";
+              st.style.background = "#d93025";
+              st.style.color = "#fff";
+              document.getElementById("body").style.background = "#fce8e6";
+              playLoudSiren();
+              sendUSB("1");
             }
-          } catch (e) {}
+          } else {
+            closedStart = 0;
+            info.innerText =
+              dist + " | Openness: " + Math.min(100, openPct) + "%";
+            st.innerText = "Awake";
+            st.style.background = "#e6f4ea";
+            st.style.color = "#137333";
+            document.getElementById("body").style.background = "#f8f9fa";
+            sendUSB("0");
+          }
         }
         requestAnimationFrame(loop);
+      }
+
+      function loop() {
+        if (vid.readyState < 2) return requestAnimationFrame(loop);
+        ctx.drawImage(vid, 0, 0, 320, 240);
+        if (fd) {
+          fd.detect(c)
+            .then(function (faces) {
+              if (faces && faces.length > 0) {
+                miss = 0;
+                var f = faces.at(0),
+                  b = f.boundingBox,
+                  cx = b.left + b.width / 2,
+                  cy = b.top + b.height / 2;
+                if (lx !== -1 && Math.hypot(cx - lx, cy - ly) > 85) {
+                  calFrames = 0;
+                  openRef = 0;
+                  closedStart = 0;
+                }
+                lx = cx;
+                ly = cy;
+                var eyes = (f.landmarks || []).filter(function (l) {
+                  return l.type === "eye";
+                });
+                var pts =
+                  eyes.length >= 2
+                    ? [eyes.at(0).locations.at(0), eyes.at(1).locations.at(0)]
+                    : [
+                        {
+                          x: b.left + b.width * 0.34,
+                          y: b.top + b.height * 0.37,
+                        },
+                        {
+                          x: b.left + b.width * 0.66,
+                          y: b.top + b.height * 0.37,
+                        },
+                      ];
+                process(pts, b.width, b.height);
+              } else {
+                if (++miss > 10) {
+                  calFrames = 0;
+                  openRef = 0;
+                  closedStart = 0;
+                  lx = -1;
+                  ly = -1;
+                }
+                st.innerText = "Waiting for Driver...";
+                st.style.background = "#fef7e0";
+                st.style.color = "#b06000";
+                info.innerText = "Scanning for Face...";
+                document.getElementById("body").style.background = "#f8f9fa";
+                sendUSB("0");
+                requestAnimationFrame(loop);
+              }
+            })
+            .catch(function () {
+              fd = null;
+              requestAnimationFrame(loop);
+            });
+        } else {
+          process(
+            [
+              { x: 120, y: 95 },
+              { x: 200, y: 95 },
+            ],
+            140,
+            140,
+          );
+        }
       }
     </script>
   </body>
