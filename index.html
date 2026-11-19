@@ -118,11 +118,8 @@
         closedFrames = 0,
         openBaseline = 0,
         learnCount = 0;
-      let audio = new (window.AudioContext || window.webkitAudioContext)();
-      const faceDetector = new FaceDetector({
-        fastMode: false,
-        maxDetectedFaces: 1,
-      });
+      let faceDetector = null;
+      let audio = null;
 
       const video = document.getElementById("webcam");
       const proc = document.getElementById("proc");
@@ -130,6 +127,18 @@
       const overlay = document.getElementById("overlay");
       const octx = overlay.getContext("2d");
       const statusBox = document.getElementById("status");
+
+      // Safely initialize FaceDetector without crashing the script
+      try {
+        if ("FaceDetector" in window) {
+          faceDetector = new FaceDetector({
+            fastMode: true,
+            maxDetectedFaces: 1,
+          });
+        }
+      } catch (err) {
+        faceDetector = null;
+      }
 
       async function connectArduino() {
         try {
@@ -142,9 +151,8 @@
         }
       }
 
-      // Measure vertical eyelid separation (ignores black hair/objects outside the eyeball)
       function measureEyelidGap(cx, cy, faceWidth) {
-        const rx = Math.max(4, Math.round(faceWidth * 0.06));
+        const rx = Math.max(5, Math.round(faceWidth * 0.06));
         const ry = Math.max(4, Math.round(faceWidth * 0.05));
         const x0 = Math.max(1, Math.round(cx - rx));
         const y0 = Math.max(1, Math.round(cy - ry));
@@ -156,7 +164,6 @@
         let verticalEdge = 0;
         let validPixels = 0;
 
-        // Compare top-to-bottom pixel differences (eyelid opening creates strong vertical edge)
         for (let y = 0; y < h - 1; y++) {
           for (let x = 0; x < w; x++) {
             const iTop = (y * w + x) * 4;
@@ -170,8 +177,8 @@
               data.at(iBot + 1) * 0.587 +
               data.at(iBot + 2) * 0.114;
 
-            // Ignore solid pure-black objects (lum < 15) so black things never trigger false scores
-            if (lumTop > 18 && lumBot > 18) {
+            // Ignore solid black objects/hair (lum < 22)
+            if (lumTop > 22 && lumBot > 22) {
               verticalEdge += Math.abs(lumTop - lumBot);
               validPixels++;
             }
@@ -182,7 +189,14 @@
 
       async function startCamera() {
         try {
-          if (audio.state === "suspended") await audio.resume();
+          statusBox.innerText = "Opening Camera...";
+          if (!audio) {
+            audio = new (window.AudioContext || window.webkitAudioContext)();
+          }
+          if (audio.state === "suspended") {
+            await audio.resume();
+          }
+
           const stream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: "user", width: 320, height: 240 },
             audio: false,
@@ -193,7 +207,9 @@
           openBaseline = 0;
           detectLoop();
         } catch (err) {
-          statusBox.innerText = "Camera Error: " + err.message;
+          statusBox.innerText = "Error: " + err.message;
+          statusBox.style.background = "#fce8e6";
+          statusBox.style.color = "#d93025";
         }
       }
 
@@ -201,108 +217,125 @@
         if (video.readyState >= 2) {
           pctx.drawImage(video, 0, 0, 320, 240);
           octx.clearRect(0, 0, 260, 260);
+          const scaleX = 260 / 320,
+            scaleY = 260 / 240;
 
-          try {
-            const faces = await faceDetector.detect(proc);
-            if (faces.length > 0) {
-              const face = faces.at(0);
-              const box = face.boundingBox;
-              const scaleX = 260 / 320,
-                scaleY = 260 / 240;
+          let eyePts = [];
+          let faceWidth = 140;
+          let faceDetected = false;
 
-              // Use exact FaceDetector eye landmarks if available
-              const eyes = (face.landmarks || []).filter(
-                (l) => l.type === "eye",
-              );
-              let eyePts = [];
+          if (faceDetector) {
+            try {
+              const faces = await faceDetector.detect(proc);
+              if (faces.length > 0) {
+                faceDetected = true;
+                const face = faces.at(0);
+                const box = face.boundingBox;
+                faceWidth = box.width;
 
-              if (eyes.length >= 2) {
-                eyePts = [
-                  eyes.at(0).locations.at(0),
-                  eyes.at(1).locations.at(0),
-                ];
-              } else {
-                eyePts = [
-                  {
-                    x: box.left + box.width * 0.34,
-                    y: box.top + box.height * 0.37,
-                  },
-                  {
-                    x: box.left + box.width * 0.66,
-                    y: box.top + box.height * 0.37,
-                  },
-                ];
-              }
-
-              // Draw tight green circles right on the eye centers
-              octx.strokeStyle = "#00e676";
-              octx.lineWidth = 2.5;
-              eyePts.forEach((pt) => {
-                octx.beginPath();
-                octx.arc(pt.x * scaleX, pt.y * scaleY, 10, 0, Math.PI * 2);
-                octx.stroke();
-              });
-
-              const score =
-                (measureEyelidGap(eyePts.at(0).x, eyePts.at(0).y, box.width) +
-                  measureEyelidGap(eyePts.at(1).x, eyePts.at(1).y, box.width)) /
-                2;
-
-              if (score > 0) {
-                if (learnCount < 20) {
-                  openBaseline =
-                    (openBaseline * learnCount + score) / (learnCount + 1);
-                  learnCount++;
-                  statusBox.innerText =
-                    "Learning Eyes (" +
-                    Math.round((learnCount / 20) * 100) +
-                    "%)";
+                const eyes = (face.landmarks || []).filter(
+                  (l) => l.type === "eye",
+                );
+                if (eyes.length >= 2) {
+                  eyePts = [
+                    eyes.at(0).locations.at(0),
+                    eyes.at(1).locations.at(0),
+                  ];
                 } else {
-                  if (score > openBaseline * 0.88) {
-                    openBaseline = openBaseline * 0.96 + score * 0.04;
-                  }
-
-                  const openness = score / Math.max(0.1, openBaseline);
-                  document.getElementById("debug").innerText =
-                    "Eye Openness: " + Math.round(openness * 100) + "%";
-
-                  if (openness < 0.65) {
-                    closedFrames++;
-                    if (closedFrames > 22) {
-                      statusBox.innerText = "WAKE UP!";
-                      statusBox.style.background = "#d93025";
-                      statusBox.style.color = "white";
-                      document.getElementById(
-                        "pageBody",
-                      ).style.backgroundColor = "#fce8e6";
-
-                      let osc = audio.createOscillator();
-                      osc.type = "square";
-                      osc.frequency.setValueAtTime(950, audio.currentTime);
-                      osc.connect(audio.destination);
-                      osc.start();
-                      osc.stop(audio.currentTime + 0.12);
-
-                      if (writer) writer.write(new TextEncoder().encode("1"));
-                    }
-                  } else {
-                    closedFrames = 0;
-                    statusBox.innerText = "Awake";
-                    statusBox.style.background = "#e6f4ea";
-                    statusBox.style.color = "#137333";
-                    document.getElementById("pageBody").style.backgroundColor =
-                      "#f8f9fa";
-                    if (writer) writer.write(new TextEncoder().encode("0"));
-                  }
+                  eyePts = [
+                    {
+                      x: box.left + box.width * 0.34,
+                      y: box.top + box.height * 0.37,
+                    },
+                    {
+                      x: box.left + box.width * 0.66,
+                      y: box.top + box.height * 0.37,
+                    },
+                  ];
                 }
               }
-            } else {
-              closedFrames = 0;
-              statusBox.innerText = "Show Face to Camera";
-              statusBox.style.background = "#fef7e0";
-              statusBox.style.color = "#b06000";
+            } catch (e) {
+              faceDetector = null;
             }
-          } catch (e) {}
+          }
+
+          // Fallback center eye points if FaceDetector is unavailable
+          if (!faceDetector) {
+            faceDetected = true;
+            eyePts = [
+              { x: 120, y: 95 },
+              { x: 200, y: 95 },
+            ];
+          }
+
+          if (faceDetected && eyePts.length === 2) {
+            // Draw tight green circles on eye centers
+            octx.strokeStyle = "#00e676";
+            octx.lineWidth = 2.5;
+            eyePts.forEach((pt) => {
+              octx.beginPath();
+              octx.arc(pt.x * scaleX, pt.y * scaleY, 10, 0, Math.PI * 2);
+              octx.stroke();
+            });
+
+            const score =
+              (measureEyelidGap(eyePts.at(0).x, eyePts.at(0).y, faceWidth) +
+                measureEyelidGap(eyePts.at(1).x, eyePts.at(1).y, faceWidth)) /
+              2;
+
+            if (score > 0) {
+              if (learnCount < 20) {
+                openBaseline =
+                  (openBaseline * learnCount + score) / (learnCount + 1);
+                learnCount++;
+                statusBox.innerText =
+                  "Learning Eyes (" +
+                  Math.round((learnCount / 20) * 100) +
+                  "%)";
+              } else {
+                if (score > openBaseline * 0.88) {
+                  openBaseline = openBaseline * 0.96 + score * 0.04;
+                }
+
+                const openness = score / Math.max(0.1, openBaseline);
+                document.getElementById("debug").innerText =
+                  "Eye Openness: " + Math.round(openness * 100) + "%";
+
+                if (openness < 0.65) {
+                  closedFrames++;
+                  if (closedFrames > 22) {
+                    statusBox.innerText = "WAKE UP!";
+                    statusBox.style.background = "#d93025";
+                    statusBox.style.color = "white";
+                    document.getElementById("pageBody").style.backgroundColor =
+                      "#fce8e6";
+
+                    let osc = audio.createOscillator();
+                    osc.type = "square";
+                    osc.frequency.setValueAtTime(950, audio.currentTime);
+                    osc.connect(audio.destination);
+                    osc.start();
+                    osc.stop(audio.currentTime + 0.12);
+
+                    if (writer) writer.write(new TextEncoder().encode("1"));
+                  }
+                } else {
+                  closedFrames = 0;
+                  statusBox.innerText = "Awake";
+                  statusBox.style.background = "#e6f4ea";
+                  statusBox.style.color = "#137333";
+                  document.getElementById("pageBody").style.backgroundColor =
+                    "#f8f9fa";
+                  if (writer) writer.write(new TextEncoder().encode("0"));
+                }
+              }
+            }
+          } else {
+            closedFrames = 0;
+            statusBox.innerText = "Show Face to Camera";
+            statusBox.style.background = "#fef7e0";
+            statusBox.style.color = "#b06000";
+          }
         }
         requestAnimationFrame(detectLoop);
       }
