@@ -92,6 +92,7 @@
     <script>
       var writer = null,
         closedStart = 0,
+        closedStreak = 0,
         openRef = 0,
         calFrames = 0,
         miss = 0,
@@ -153,8 +154,8 @@
       }
 
       function measureEye(cx, cy, fw, fh) {
-        var rx = Math.max(8, Math.round(fw * 0.09));
-        var ry = Math.max(6, Math.round(fh * 0.06));
+        var rx = Math.max(8, Math.round(fw * 0.085));
+        var ry = Math.max(6, Math.round(fh * 0.055));
         var x0 = Math.max(1, Math.round(cx - rx));
         var y0 = Math.max(1, Math.round(cy - ry));
         var w = Math.min(318 - x0, rx * 2);
@@ -178,10 +179,10 @@
               borderSum += lum;
               borderCount++;
             } else if (
-              x > w * 0.25 &&
-              x < w * 0.75 &&
-              y > h * 0.2 &&
-              y < h * 0.8
+              x > w * 0.28 &&
+              x < w * 0.72 &&
+              y > h * 0.25 &&
+              y < h * 0.75
             ) {
               if (lum < centerMin) centerMin = lum;
             }
@@ -189,7 +190,6 @@
         }
 
         var avgLum = totalLum / (w * h);
-        // Only ignore if camera lens is completely covered by a pitch-black object (avgLum < 15)
         if (avgLum < 15 || borderCount === 0) return -1;
 
         var skinAvg = borderSum / borderCount;
@@ -216,6 +216,7 @@
             calFrames = 0;
             openRef = 0;
             closedStart = 0;
+            closedStreak = 0;
             loop();
           })
           .catch(function (e) {
@@ -229,6 +230,7 @@
 
         if (e1 < 0 || e2 < 0) {
           closedStart = 0;
+          closedStreak = 0;
           info.innerText = "Camera Covered / Too Dark";
           return requestAnimationFrame(loop);
         }
@@ -236,33 +238,43 @@
         var val = (e1 + e2) / 2;
         var dist = fw > 175 ? "Near" : fw < 85 ? "Far" : "Optimal";
 
-        if (calFrames < 10) {
+        if (calFrames < 15) {
           openRef = (openRef * calFrames + val) / (calFrames + 1);
           calFrames++;
           st.innerText = "Locking Eyes...";
           st.style.background = "#e8f0fe";
           st.style.color = "#1a73e8";
         } else {
-          if (val > openRef * 0.9 && closedStart === 0) {
-            openRef = openRef * 0.96 + val * 0.04;
+          // Keep openRef stable so raised eyebrows or shadows never cause false triggers
+          if (
+            val > openRef * 0.85 &&
+            val < openRef * 1.25 &&
+            closedStreak === 0
+          ) {
+            openRef = openRef * 0.98 + val * 0.02;
           }
 
           var openPct = Math.round((val / Math.max(0.05, openRef)) * 100);
 
-          if (openPct < 65) {
-            if (closedStart === 0) closedStart = Date.now();
-            var elapsed = (Date.now() - closedStart) / 1000;
-            info.innerText =
-              dist + " | Closed: " + elapsed.toFixed(1) + "s / 3.0s";
-            if (elapsed >= 3.0) {
-              st.innerText = "WAKE UP!";
-              st.style.background = "#d93025";
-              st.style.color = "#fff";
-              document.getElementById("body").style.background = "#fce8e6";
-              playLoudSiren();
-              sendUSB("1");
+          // Only count as closed when openness drops below 45% for at least 4 frames in a row
+          if (openPct < 45) {
+            closedStreak++;
+            if (closedStreak >= 4) {
+              if (closedStart === 0) closedStart = Date.now();
+              var elapsed = (Date.now() - closedStart) / 1000;
+              info.innerText =
+                dist + " | Closed: " + elapsed.toFixed(1) + "s / 3.0s";
+              if (elapsed >= 3.0) {
+                st.innerText = "WAKE UP!";
+                st.style.background = "#d93025";
+                st.style.color = "#fff";
+                document.getElementById("body").style.background = "#fce8e6";
+                playLoudSiren();
+                sendUSB("1");
+              }
             }
           } else {
+            closedStreak = 0;
             closedStart = 0;
             info.innerText =
               dist + " | Openness: " + Math.min(100, openPct) + "%";
@@ -292,6 +304,7 @@
                   calFrames = 0;
                   openRef = 0;
                   closedStart = 0;
+                  closedStreak = 0;
                 }
                 lx = cx;
                 ly = cy;
@@ -317,6 +330,7 @@
                   calFrames = 0;
                   openRef = 0;
                   closedStart = 0;
+                  closedStreak = 0;
                   lx = -1;
                   ly = -1;
                 }
