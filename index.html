@@ -5,7 +5,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, user-scalable=no"
     />
-    <title>Driver Detector</title>
+    <title>Sleeping Driver Detector</title>
   </head>
   <body
     id="body"
@@ -65,7 +65,7 @@
         font-weight: bold;
       "
     >
-      Ready! Instant Start
+      Ready! Tap Start
     </div>
     <video
       id="vid"
@@ -91,6 +91,7 @@
 
     <script>
       var writer = null,
+        lastUsbVal = "",
         closedStart = 0,
         closedStreak = 0,
         openRef = 0,
@@ -128,10 +129,12 @@
       }
 
       function sendUSB(v) {
-        if (writer)
+        if (writer && v !== lastUsbVal) {
+          lastUsbVal = v;
           try {
             writer.write(new TextEncoder().encode(v));
           } catch (e) {}
+        }
       }
 
       function playLoudSiren() {
@@ -154,12 +157,12 @@
       }
 
       function measureEye(cx, cy, fw, fh) {
-        var rx = Math.max(8, Math.round(fw * 0.085));
-        var ry = Math.max(6, Math.round(fh * 0.055));
-        var x0 = Math.max(1, Math.round(cx - rx));
-        var y0 = Math.max(1, Math.round(cy - ry));
-        var w = Math.min(318 - x0, rx * 2);
-        var h = Math.min(238 - y0, ry * 2);
+        var rx = Math.max(8, Math.round(fw * 0.085)),
+          ry = Math.max(6, Math.round(fh * 0.055));
+        var x0 = Math.max(1, Math.round(cx - rx)),
+          y0 = Math.max(1, Math.round(cy - ry));
+        var w = Math.min(318 - x0, rx * 2),
+          h = Math.min(238 - y0, ry * 2);
         if (w <= 4 || h <= 4) return -1;
 
         var d = ctx.getImageData(x0, y0, w, h).data;
@@ -189,9 +192,7 @@
           }
         }
 
-        var avgLum = totalLum / (w * h);
-        if (avgLum < 15 || borderCount === 0) return -1;
-
+        if (totalLum / (w * h) < 18 || borderCount === 0) return -1;
         var skinAvg = borderSum / borderCount;
         return (skinAvg - centerMin) / Math.max(15, skinAvg);
       }
@@ -231,7 +232,7 @@
         if (e1 < 0 || e2 < 0) {
           closedStart = 0;
           closedStreak = 0;
-          info.innerText = "Camera Covered / Too Dark";
+          info.innerText = "Dark Shadow Ignored";
           return requestAnimationFrame(loop);
         }
 
@@ -245,7 +246,6 @@
           st.style.background = "#e8f0fe";
           st.style.color = "#1a73e8";
         } else {
-          // Keep openRef stable so raised eyebrows or shadows never cause false triggers
           if (
             val > openRef * 0.85 &&
             val < openRef * 1.25 &&
@@ -256,10 +256,8 @@
 
           var openPct = Math.round((val / Math.max(0.05, openRef)) * 100);
 
-          // Only count as closed when openness drops below 45% for at least 4 frames in a row
           if (openPct < 45) {
-            closedStreak++;
-            if (closedStreak >= 4) {
+            if (++closedStreak >= 5) {
               if (closedStart === 0) closedStart = Date.now();
               var elapsed = (Date.now() - closedStart) / 1000;
               info.innerText =
